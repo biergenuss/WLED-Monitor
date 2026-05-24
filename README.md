@@ -25,7 +25,7 @@ A compact, hardware-based monitoring solution designed to cycle through and disp
   * 8 x M2x10 Bolts
   * 4 x M2 Nuts
   * 4 x M2 Heat-Set-Inserts
-  * 1 x USB-C Female port [AliExpress](https://www.aliexpress.com/item/1005011963865787.html)
+  * 1 x USB-C Female port [Buy on AliExpress (Global Link)](https://www.aliexpress.com/item/1005011963865787.html)
   * 2 x 2-port WAGO connector
 
 ## Wiring
@@ -54,7 +54,7 @@ The 3D printing files for the custom enclosure are available as a package in the
 </p>
 
 * **Recommended Print Settings:**
-  * Material: PLA or PETG (Carbon Fiber PLA recommended for the authentic look)
+  * Material: PLA or PETG
   * Layer Height: 0.2mm
   * Infill: 15% - 20%
   * Supports: Not required if oriented correctly
