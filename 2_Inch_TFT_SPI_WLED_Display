@@ -1,0 +1,474 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+#include <math.h>
+#include <ArduinoOTA.h>
+
+// ==================== CONFIGURATION ====================
+const char* ssid     = "WIFI_SSID";
+const char* password = "WIFI_PASS";
+
+const int numInstances = 5; // adjust this number according to the number of your devices
+const char* wledHosts[] = {
+  "192.168.XXX.XXX",        //input your WLED IPs
+  "192.168.XXX.XXX",
+  "192.168.XXX.XXX",
+  "192.168.XXX.XXX",
+  "192.168.XXX.XXX"         // remove IP slots you dont need
+};
+const char* wledNames[] = {
+  "Lamp",                   // put in the names in order of the IPs      
+  "8x8 Matrix",
+  "LED Ring",
+  "Monster Energy Can",
+  "Desklamp"
+};
+int currentInstance = 0;
+
+#define TFT_CS         15
+#define TFT_DC         2
+#define TFT_RST        4
+#define TFT_MOSI       23
+#define TFT_SCLK       18
+
+#define SCREEN_WIDTH   240
+#define SCREEN_HEIGHT  320
+
+const int deviceNameTextSize = 1; // input your desired font size for the device name, only full numbers, like 1, 2, 3
+
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+struct WLEDData {
+  String name;
+  String ip;
+  bool isOnline;
+  bool isOn;
+  int brightness;
+  int ledCount;
+  uint8_t r, g, b;
+  String effectName;
+  String paletteName;
+  String presetName;
+  int fxId;
+  int palId;
+  int psId;
+  long uptime;
+  int wifiSignal;
+  int speed;
+  int intensity;
+  int custom1, custom2, custom3;
+  bool nightlightOn;
+  int nightlightDur;
+  String version;
+  int fps;
+  int powerMa;
+};
+
+unsigned long lastSwitchTime = 0;
+void drawStatusMessage(String message, uint16_t color);
+String fetchPresetName(String ip, int presetId);
+WLEDData fetchWLEDData(String ip);
+void renderWLEDInterface(WLEDData data, String ip, String displayName);
+uint16_t rgbTo565(uint8_t r, uint8_t g, uint8_t b);
+
+// ==================== SETUP ====================
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  tft.init(SCREEN_WIDTH, SCREEN_HEIGHT);
+  tft.setRotation(2);
+  tft.fillScreen(ST77XX_BLACK);
+  drawStatusMessage("Connecting WiFi...", ST77XX_ORANGE);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected!");
+  drawStatusMessage("WiFi connected!", ST77XX_GREEN);
+  delay(1000);
+
+  ArduinoOTA.setHostname("wled-monitor");
+  ArduinoOTA.begin();
+
+  lastSwitchTime = millis();
+}
+
+// ==================== LOOP ====================
+void loop() {
+  ArduinoOTA.handle();
+  if (millis() - lastSwitchTime >= 20000) {
+    currentInstance = (currentInstance + 1) % numInstances;
+    String targetIP = wledHosts[currentInstance];
+    WLEDData data = fetchWLEDData(targetIP);
+    renderWLEDInterface(data, targetIP, wledNames[currentInstance]);
+    lastSwitchTime = millis();
+  }
+  delay(10);
+}
+
+// ==================== WLED FUNCTIONS ====================
+uint16_t rgbTo565(uint8_t r, uint8_t g, uint8_t b) {
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+String fetchPresetName(String ip, int presetId) {
+  if (presetId < 0) return "No Preset";
+  HTTPClient http;
+  String url = "http://" + ip + "/presets.json";
+  http.begin(url);
+  http.setTimeout(2000);
+  int httpCode = http.GET();
+  String presetName = "Unknown";
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(8192);
+    DeserializationError error = deserializeJson(doc, payload);
+    if (!error) {
+      for (JsonPair kv : doc.as<JsonObject>()) {
+        if (strcmp(kv.key().c_str(), String(presetId).c_str()) == 0) {
+          JsonObject preset = kv.value().as<JsonObject>();
+          presetName = preset["n"].as<String>();
+          break;
+        }
+      }
+    }
+  }
+  http.end();
+  return presetName;
+}
+
+WLEDData fetchWLEDData(String ip) {
+  WLEDData wled;
+  wled.isOnline = false;
+  wled.ip = ip;
+  if (WiFi.status() != WL_CONNECTED) return wled;
+
+  HTTPClient http;
+  String url = "http://" + ip + "/json";
+  http.begin(url);
+  http.setTimeout(2500);
+  int httpCode = http.GET();
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(8192);
+    DeserializationError error = deserializeJson(doc, payload);
+    if (!error) {
+      wled.isOnline = true;
+      JsonObject state = doc["state"];
+      wled.isOn = state["on"] | false;
+      wled.brightness = state["bri"] | 0;
+
+      JsonObject info = doc["info"];
+      wled.name = info["name"] | "WLED";
+      wled.ledCount = info["leds"]["count"] | 0;
+      wled.wifiSignal = info["wifi"]["signal"] | -1;
+      wled.uptime = info["uptime"] | 0;
+      wled.version = info["ver"] | "?";
+      JsonObject leds = info["leds"];
+      wled.fps = leds["fps"] | 0;
+      wled.powerMa = leds["pwr"] | 0;
+
+      JsonObject nl = state["nl"];
+      wled.nightlightOn = nl["on"] | false;
+      wled.nightlightDur = nl["dur"] | 0;
+
+      JsonObject seg0 = state["seg"][0];
+      if (seg0) {
+        JsonArray col0 = seg0["col"][0];
+        if (col0) {
+          wled.r = col0[0] | 0;
+          wled.g = col0[1] | 0; wled.b = col0[2] | 0;
+        } else {
+          wled.r = 255; wled.g = 160;
+          wled.b = 0;
+        }
+        wled.fxId = seg0["fx"] | 0;
+        wled.palId = seg0["pal"] | 0;
+        wled.speed = seg0["sx"] | 0;
+        wled.intensity = seg0["ix"] | 0;
+        wled.custom1 = seg0["c1"] | 0;
+        wled.custom2 = seg0["c2"] | 0;
+        wled.custom3 = seg0["c3"] | 0;
+      }
+      wled.psId = state["ps"] | -1;
+      wled.presetName = fetchPresetName(ip, wled.psId);
+
+      JsonArray effects = doc["effects"];
+      wled.effectName = (effects && wled.fxId < effects.size()) ? effects[wled.fxId].as<String>() : "Unknown";
+      JsonArray palettes = doc["palettes"];
+      if (palettes && wled.palId < palettes.size()) {
+        wled.paletteName = palettes[wled.palId].as<String>();
+      } else {
+        HTTPClient palHttp;
+        palHttp.begin("http://" + ip + "/json/pal");
+        palHttp.setTimeout(1500);
+        if (palHttp.GET() == HTTP_CODE_OK) {
+          String palPayload = palHttp.getString();
+          DynamicJsonDocument palDoc(4096);
+          DeserializationError palError = deserializeJson(palDoc, palPayload);
+          if (!palError && palDoc.is<JsonArray>()) {
+            JsonArray palArray = palDoc.as<JsonArray>();
+            wled.paletteName = (wled.palId < palArray.size()) ? palArray[wled.palId].as<String>() : "Unknown";
+          } else wled.paletteName = "Error";
+        } else wled.paletteName = "Unknown";
+        palHttp.end();
+      }
+    }
+  }
+  http.end();
+  return wled;
+}
+
+void renderWLEDInterface(WLEDData data, String ip, String displayName) {
+  uint16_t wled_bg = rgbTo565(33, 34, 41);
+  tft.fillScreen(wled_bg);
+  uint16_t primaryColor565 = rgbTo565(data.r, data.g, data.b);
+  uint16_t accentColor565 = rgbTo565(min(255, data.r + 50), min(255, data.g + 50), min(255, data.b + 50));
+  uint16_t dimGray = rgbTo565(140, 140, 140);
+  uint16_t statLabelColor = rgbTo565(180, 180, 180);
+
+  // ===== HEADER (dark bar) =====
+  int headerHeight = 26;
+  tft.fillRect(0, 0, SCREEN_WIDTH, headerHeight, rgbTo565(30, 30, 37));
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  String headerTitle = "WLED-Monitor 1.0";
+  int16_t tx, ty;
+  uint16_t tw, th;
+  tft.getTextBounds(headerTitle, 0, 0, &tx, &ty, &tw, &th);
+  
+  int headerX = (SCREEN_WIDTH - tw) / 2;
+  int headerY = (headerHeight - th) / 2 - ty;
+  tft.setCursor(headerX, headerY);
+  tft.print(headerTitle);
+
+  // OFFLINE Screen
+  if (!data.isOnline) {
+    tft.setTextColor(ST77XX_RED);
+    tft.setTextSize(3);
+    String offlineTxt = "OFFLINE";
+    tft.getTextBounds(offlineTxt, 0, 0, &tx, &ty, &tw, &th);
+    tft.setCursor((SCREEN_WIDTH - tw) / 2, 110);
+    tft.print(offlineTxt);
+
+    tft.setTextSize(2);
+    tft.setTextColor(rgbTo565(230, 90, 90));
+    tft.getTextBounds(displayName, 0, 0, &tx, &ty, &tw, &th);
+    tft.setCursor((SCREEN_WIDTH - tw) / 2, 160);
+    tft.print(displayName);
+
+    tft.setTextSize(1);
+    tft.setTextColor(statLabelColor);
+    String ipTxt = "IP: " + ip;
+    tft.getTextBounds(ipTxt, 0, 0, &tx, &ty, &tw, &th);
+    tft.setCursor((SCREEN_WIDTH - tw) / 2, 200);
+    tft.print(ipTxt);
+    
+    return;
+  }
+
+  // ===== DEVICE NAME & POWER BUTTON =====
+  tft.setTextSize(deviceNameTextSize);
+  tft.setTextColor(primaryColor565);
+  
+  uint16_t nameW, nameH;
+  tft.getTextBounds(displayName, 0, 0, &tx, &ty, &nameW, &nameH);
+
+  int buttonWidth = 65, buttonHeight = 22;
+  int buttonX = SCREEN_WIDTH - buttonWidth - 5;
+  
+  int rowCenterY = 55; 
+  int nameY = rowCenterY - ty - (nameH / 2);
+  int buttonY = rowCenterY - (buttonHeight / 2);
+
+  tft.setCursor(5, nameY);
+  tft.print(displayName);
+
+  // Button
+  if (data.isOn) {
+    tft.fillRoundRect(buttonX, buttonY, buttonWidth, buttonHeight, 4, primaryColor565);
+    tft.setTextColor(ST77XX_BLACK);
+  } else {
+    tft.drawRoundRect(buttonX, buttonY, buttonWidth, buttonHeight, 4, ST77XX_WHITE);
+    tft.setTextColor(ST77XX_WHITE);
+  }
+
+  // Text On/Off in button
+  tft.setTextSize(1);
+  String powerText = data.isOn ? "ON" : "OFF";
+  uint16_t btnTextW, btnTextH;
+  int16_t btnTextX, btnTextY;
+  tft.getTextBounds(powerText, 0, 0, &btnTextX, &btnTextY, &btnTextW, &btnTextH);
+  
+  int textX = buttonX + (buttonWidth - btnTextW) / 2 - btnTextX;
+  int textY = buttonY + (buttonHeight - btnTextH) / 2 - btnTextY;
+  tft.setCursor(textX, textY);
+  tft.print(powerText);
+
+  // Line
+  int y = max(nameY + nameH + ty, buttonY + buttonHeight) + 8;
+  tft.drawFastHLine(5, y, SCREEN_WIDTH - 10, rgbTo565(80, 80, 80));
+
+  // ===== EFFECT =====
+  y += 16;
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, y);
+  tft.print("Effect: ");
+  tft.setTextColor(accentColor565);
+  tft.print(data.effectName);
+  tft.setTextColor(dimGray);
+  tft.print(" s:" + String(data.speed) + " i:" + String(data.intensity));
+
+  // ===== PALETTE =====
+  y += 20;
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, y);
+  tft.print("Palette: ");
+  tft.setTextColor(accentColor565);
+  tft.print(data.paletteName);
+  tft.setTextColor(dimGray);
+  tft.print(" ID:" + String(data.palId));
+
+  // ===== PRESET =====
+  y += 20;
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, y);
+  tft.print("Preset: ");
+  tft.setTextColor(accentColor565);
+  tft.print(data.presetName);
+  if (data.psId >= 0) {
+    tft.setTextColor(dimGray);
+    tft.print(" ID:" + String(data.psId));
+  }
+
+  // line
+  y += 16;
+  tft.drawFastHLine(5, y, SCREEN_WIDTH - 10, rgbTo565(80, 80, 80));
+
+  // ===== BRIGHTNESS =====
+  y += 14;
+  int sliderY = y + 4;
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, sliderY - 10);
+  tft.print("Brightness");
+  tft.setCursor(SCREEN_WIDTH - 35, sliderY - 10);
+  int percentBri = data.isOn ? map(data.brightness, 0, 255, 0, 100) : 0;
+  tft.print(percentBri);
+  tft.print("%");
+  tft.drawRoundRect(5, sliderY, SCREEN_WIDTH - 10, 14, 7, ST77XX_WHITE);
+  int fillWidth = data.isOn ? map(data.brightness, 0, 255, 0, SCREEN_WIDTH - 14) : 0;
+  if (fillWidth > 0) {
+    tft.fillRoundRect(7, sliderY + 2, fillWidth, 10, 5, primaryColor565);
+  }
+
+  // ===== LED COUNT =====
+  y = sliderY + 26;
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(5, y);
+  tft.print("LEDs: ");
+  tft.setTextColor(accentColor565);
+  tft.print(data.ledCount);
+
+  // distance + line
+  y += 18;
+  tft.drawFastHLine(5, y, SCREEN_WIDTH - 10, rgbTo565(80, 80, 80));
+
+  // ===== STATISTICS =====
+  int statsLines = 5;
+  if (data.powerMa > 0) statsLines++;
+  if (data.nightlightOn) statsLines++;
+  int lineHeight = 14;
+  int totalStatsHeight = statsLines * lineHeight;
+  int statsStartY = SCREEN_HEIGHT - 6 - totalStatsHeight;
+
+  int statY = statsStartY;
+  tft.setTextSize(1);
+  
+  // IP
+  tft.setTextColor(statLabelColor);
+  tft.setCursor(5, statY);
+  tft.print("IP: ");
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(data.ip);
+  statY += lineHeight;
+  
+  // WiFi Signal
+  tft.setTextColor(statLabelColor);
+  tft.setCursor(5, statY);
+  tft.print("WiFi Signal: ");
+  tft.setTextColor(ST77XX_WHITE);
+  if (data.wifiSignal >= 0) {
+    tft.print(data.wifiSignal);
+    tft.print("%");
+  } else {
+    tft.print("N/A");
+  }
+  statY += lineHeight;
+
+  // Uptime
+  tft.setTextColor(statLabelColor);
+  tft.setCursor(5, statY);
+  tft.print("Uptime: ");
+  tft.setTextColor(ST77XX_WHITE);
+  long hours = data.uptime / 3600;
+  long minutes = (data.uptime % 3600) / 60;
+  if (hours > 0) {
+    tft.print(hours);
+    tft.print("h ");
+  }
+  tft.print(minutes);
+  tft.print("m");
+  statY += lineHeight;
+  
+  // Version
+  tft.setTextColor(statLabelColor);
+  tft.setCursor(5, statY);
+  tft.print("Version: ");
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(data.version);
+  statY += lineHeight;
+  
+  // FPS
+  tft.setTextColor(statLabelColor);
+  tft.setCursor(5, statY);
+  tft.print("FPS: ");
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(data.fps);
+  statY += lineHeight;
+  
+  // Power
+  if (data.powerMa > 0) {
+    tft.setTextColor(statLabelColor);
+    tft.setCursor(5, statY);
+    tft.print("Power: ");
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print(data.powerMa);
+    tft.print(" mA");
+    statY += lineHeight;
+  }
+
+  // Nightlight
+  if (data.nightlightOn) {
+    tft.setTextColor(statLabelColor);
+    tft.setCursor(5, statY);
+    tft.print("Nightlight: ");
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print("active, ");
+    tft.print(data.nightlightDur);
+    tft.print(" min");
+  }
+}
+
+void drawStatusMessage(String message, uint16_t color) {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(color);
+  tft.setTextSize(2);
+  tft.setCursor(20, SCREEN_HEIGHT / 2 - 20);
+  tft.print(message);
+}
