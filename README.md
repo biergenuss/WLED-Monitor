@@ -18,7 +18,7 @@ A compact, hardware-based monitoring solution designed to cycle through and disp
 * **Display:** 2.0-inch SPI TFT LCD Module 
   * Resolution: 240x320 pixels
   * Driver: ST7789 (IPS panel with wide viewing angles)
-  * Pinout: 7-Pin SPI (GND, VCC, SCL, SDA, RES, DC, BLK)
+  * Pinout: 7-Pin SPI (GND, VCC, SCL, SDA, RST, DC, BLK)
   * [Buy on AliExpress (Global Link)](https://www.aliexpress.com/item/1005007523612119.html)
   * *Search keywords if link expires:* `2.0 inch tft spi st7789 240x320`
 * **Other hardware**
